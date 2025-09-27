@@ -1,12 +1,12 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import dotenv from 'dotenv';
+import dotenv from "dotenv";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Client, GatewayIntentBits, TextChannel } from 'discord.js';
-import { z } from 'zod';
+import { Client, GatewayIntentBits, TextChannel, ForumChannel, ChannelType } from "discord.js";
+import { z } from "zod";
 
 // Load environment variables
 dotenv.config();
@@ -29,8 +29,11 @@ async function findGuild(guildIdentifier?: string) {
     }
     // List available guilds
     const guildList = Array.from(client.guilds.cache.values())
-      .map(g => `"${g.name}"`).join(', ');
-    throw new Error(`Bot is in multiple servers. Please specify server name or ID. Available servers: ${guildList}`);
+      .map((g) => `"${g.name}"`)
+      .join(", ");
+    throw new Error(
+      `Bot is in multiple servers. Please specify server name or ID. Available servers: ${guildList}`
+    );
   }
 
   // Try to fetch by ID first
@@ -40,17 +43,22 @@ async function findGuild(guildIdentifier?: string) {
   } catch {
     // If ID fetch fails, search by name
     const guilds = client.guilds.cache.filter(
-      g => g.name.toLowerCase() === guildIdentifier.toLowerCase()
+      (g) => g.name.toLowerCase() === guildIdentifier.toLowerCase()
     );
-    
+
     if (guilds.size === 0) {
       const availableGuilds = Array.from(client.guilds.cache.values())
-        .map(g => `"${g.name}"`).join(', ');
-      throw new Error(`Server "${guildIdentifier}" not found. Available servers: ${availableGuilds}`);
+        .map((g) => `"${g.name}"`)
+        .join(", ");
+      throw new Error(
+        `Server "${guildIdentifier}" not found. Available servers: ${availableGuilds}`
+      );
     }
     if (guilds.size > 1) {
-      const guildList = guilds.map(g => `${g.name} (ID: ${g.id})`).join(', ');
-      throw new Error(`Multiple servers found with name "${guildIdentifier}": ${guildList}. Please specify the server ID.`);
+      const guildList = guilds.map((g) => `${g.name} (ID: ${g.id})`).join(", ");
+      throw new Error(
+        `Multiple servers found with name "${guildIdentifier}": ${guildList}. Please specify the server ID.`
+      );
     }
     return guilds.first()!;
   }
@@ -58,9 +66,12 @@ async function findGuild(guildIdentifier?: string) {
 }
 
 // Helper function to find a channel by name or ID within a specific guild
-async function findChannel(channelIdentifier: string, guildIdentifier?: string): Promise<TextChannel> {
+async function findChannel(
+  channelIdentifier: string,
+  guildIdentifier?: string
+): Promise<TextChannel> {
   const guild = await findGuild(guildIdentifier);
-  
+
   // First try to fetch by ID
   try {
     const channel = await client.channels.fetch(channelIdentifier);
@@ -73,35 +84,60 @@ async function findChannel(channelIdentifier: string, guildIdentifier?: string):
       (channel): channel is TextChannel =>
         channel instanceof TextChannel &&
         (channel.name.toLowerCase() === channelIdentifier.toLowerCase() ||
-         channel.name.toLowerCase() === channelIdentifier.toLowerCase().replace('#', ''))
+          channel.name.toLowerCase() ===
+            channelIdentifier.toLowerCase().replace("#", ""))
     );
 
     if (channels.size === 0) {
       const availableChannels = guild.channels.cache
         .filter((c): c is TextChannel => c instanceof TextChannel)
-        .map(c => `"#${c.name}"`).join(', ');
-      throw new Error(`Channel "${channelIdentifier}" not found in server "${guild.name}". Available channels: ${availableChannels}`);
+        .map((c) => `"#${c.name}"`)
+        .join(", ");
+      throw new Error(
+        `Channel "${channelIdentifier}" not found in server "${guild.name}". Available channels: ${availableChannels}`
+      );
     }
     if (channels.size > 1) {
-      const channelList = channels.map(c => `#${c.name} (${c.id})`).join(', ');
-      throw new Error(`Multiple channels found with name "${channelIdentifier}" in server "${guild.name}": ${channelList}. Please specify the channel ID.`);
+      const channelList = channels
+        .map((c) => `#${c.name} (${c.id})`)
+        .join(", ");
+      throw new Error(
+        `Multiple channels found with name "${channelIdentifier}" in server "${guild.name}": ${channelList}. Please specify the channel ID.`
+      );
     }
     return channels.first()!;
   }
-  throw new Error(`Channel "${channelIdentifier}" is not a text channel or not found in server "${guild.name}"`);
+  throw new Error(
+    `Channel "${channelIdentifier}" is not a text channel or not found in server "${guild.name}"`
+  );
 }
 
 // Updated validation schemas
 const SendMessageSchema = z.object({
-  server: z.string().optional().describe('Server name or ID (optional if bot is only in one server)'),
+  server: z
+    .string()
+    .optional()
+    .describe("Server name or ID (optional if bot is only in one server)"),
   channel: z.string().describe('Channel name (e.g., "general") or ID'),
   message: z.string(),
 });
 
 const ReadMessagesSchema = z.object({
-  server: z.string().optional().describe('Server name or ID (optional if bot is only in one server)'),
+  server: z
+    .string()
+    .optional()
+    .describe("Server name or ID (optional if bot is only in one server)"),
   channel: z.string().describe('Channel name (e.g., "general") or ID'),
   limit: z.number().min(1).max(100).default(50),
+});
+
+const ReadForumThreadsSchema = z.object({
+  server: z
+    .string()
+    .optional()
+    .describe("Server name or ID (optional if bot is only in one server)"),
+  channel: z.string().describe("Forum channel name or ID"),
+  limit: z.number().min(1).max(50).default(10),
 });
 
 // Create server instance
@@ -129,7 +165,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             server: {
               type: "string",
-              description: 'Server name or ID (optional if bot is only in one server)',
+              description:
+                "Server name or ID (optional if bot is only in one server)",
             },
             channel: {
               type: "string",
@@ -151,7 +188,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             server: {
               type: "string",
-              description: 'Server name or ID (optional if bot is only in one server)',
+              description:
+                "Server name or ID (optional if bot is only in one server)",
             },
             channel: {
               type: "string",
@@ -161,6 +199,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of messages to fetch (max 100)",
               default: 50,
+            },
+          },
+          required: ["channel"],
+        },
+      },
+      {
+        name: "read-forum-threads",
+        description: "Read threads and posts from a Discord forum channel",
+        inputSchema: {
+          type: "object",
+          properties: {
+            server: {
+              type: "string",
+              description:
+                "Server name or ID (optional if bot is only in one server)",
+            },
+            channel: {
+              type: "string",
+              description: "Forum channel name or ID",
+            },
+            limit: {
+              type: "number",
+              description: "Number of threads to fetch (max 50)",
+              default: 10,
             },
           },
           required: ["channel"],
@@ -177,36 +239,156 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "send-message": {
-        const { channel: channelIdentifier, message } = SendMessageSchema.parse(args);
+        const { channel: channelIdentifier, message } =
+          SendMessageSchema.parse(args);
         const channel = await findChannel(channelIdentifier);
-        
+
         const sent = await channel.send(message);
         return {
-          content: [{
-            type: "text",
-            text: `Message sent successfully to #${channel.name} in ${channel.guild.name}. Message ID: ${sent.id}`,
-          }],
+          content: [
+            {
+              type: "text",
+              text: `Message sent successfully to #${channel.name} in ${channel.guild.name}. Message ID: ${sent.id}`,
+            },
+          ],
         };
       }
 
       case "read-messages": {
-        const { channel: channelIdentifier, limit } = ReadMessagesSchema.parse(args);
+        const { channel: channelIdentifier, limit } =
+          ReadMessagesSchema.parse(args);
         const channel = await findChannel(channelIdentifier);
-        
+
         const messages = await channel.messages.fetch({ limit });
-        const formattedMessages = Array.from(messages.values()).map(msg => ({
+        const formattedMessages = Array.from(messages.values()).map((msg) => ({
           channel: `#${channel.name}`,
           server: channel.guild.name,
           author: msg.author.tag,
           content: msg.content,
           timestamp: msg.createdAt.toISOString(),
+          attachments: msg.attachments.map(attachment => ({
+            id: attachment.id,
+            name: attachment.name,
+            url: attachment.url,
+            proxyUrl: attachment.proxyURL,
+            size: attachment.size,
+            contentType: attachment.contentType,
+            width: attachment.width,
+            height: attachment.height,
+          })),
+          embeds: msg.embeds.length > 0 ? msg.embeds.map(embed => ({
+            title: embed.title,
+            description: embed.description,
+            url: embed.url,
+            image: embed.image?.url,
+            thumbnail: embed.thumbnail?.url,
+          })) : [],
         }));
 
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(formattedMessages, null, 2),
-          }],
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(formattedMessages, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "read-forum-threads": {
+        const { channel: channelIdentifier, limit } =
+          ReadForumThreadsSchema.parse(args);
+        // Find the guild and forum channel
+        const guild = await findGuild(args!.server as string | undefined);
+        // Try to fetch by ID first
+        let forumChannel: ForumChannel | undefined;
+        try {
+          const ch = await guild.channels.fetch(channelIdentifier);
+          if (ch && ch.type === ChannelType.GuildForum) {
+            forumChannel = ch as ForumChannel;
+          }
+        } catch {}
+        if (!forumChannel) {
+          // Search by name
+          const channels = guild.channels.cache.filter(
+            (c): c is ForumChannel =>
+              c.type === ChannelType.GuildForum &&
+              (c.name.toLowerCase() === channelIdentifier.toLowerCase() ||
+                c.name.toLowerCase() ===
+                  channelIdentifier.toLowerCase().replace("#", ""))
+          );
+          if (channels.size === 0) {
+            const availableForums = guild.channels.cache
+              .filter((c) => c.type === ChannelType.GuildForum)
+              .map((c) => `"#${c.name}"`)
+              .join(", ");
+            throw new Error(
+              `Forum channel "${channelIdentifier}" not found in server "${guild.name}". Available forums: ${availableForums}`
+            );
+          }
+          if (channels.size > 1) {
+            const forumList = channels
+              .map((c) => `#${c.name} (${c.id})`)
+              .join(", ");
+            throw new Error(
+              `Multiple forum channels found with name "${channelIdentifier}" in server "${guild.name}": ${forumList}. Please specify the channel ID.`
+            );
+          }
+          forumChannel = channels.first();
+        }
+        
+        if (!forumChannel) {
+          throw new Error(`Forum channel "${channelIdentifier}" not found`);
+        }
+        
+        // Fetch threads in the forum channel
+        const threads = await forumChannel.threads.fetchActive();
+        const threadList = Array.from(threads.threads.values()).slice(0, limit);
+        // For each thread, fetch the latest messages
+        const result = [];
+        for (const thread of threadList) {
+          const threadMessages = await thread.messages.fetch({ limit: 10 });
+          const messagesArr = Array.from(threadMessages.values()).map(
+            (msg) => ({
+              thread: thread.name,
+              threadId: thread.id,
+              channel: `#${forumChannel!.name}`,
+              server: guild.name,
+              author: msg.author.tag,
+              content: msg.content,
+              timestamp: msg.createdAt.toISOString(),
+              attachments: msg.attachments.map(attachment => ({
+                id: attachment.id,
+                name: attachment.name,
+                url: attachment.url,
+                proxyUrl: attachment.proxyURL,
+                size: attachment.size,
+                contentType: attachment.contentType,
+                width: attachment.width,
+                height: attachment.height,
+              })),
+              embeds: msg.embeds.length > 0 ? msg.embeds.map(embed => ({
+                title: embed.title,
+                description: embed.description,
+                url: embed.url,
+                image: embed.image?.url,
+                thumbnail: embed.thumbnail?.url,
+              })) : [],
+            })
+          );
+          result.push({
+            thread: thread.name,
+            threadId: thread.id,
+            messages: messagesArr,
+          });
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
         };
       }
 
@@ -226,8 +408,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // Discord client login and error handling
-client.once('ready', () => {
-  console.error('Discord bot is ready!');
+client.once("ready", () => {
+  console.error("Discord bot is ready!");
 });
 
 // Start the server
@@ -235,9 +417,9 @@ async function main() {
   // Check for Discord token
   const token = process.env.DISCORD_TOKEN;
   if (!token) {
-    throw new Error('DISCORD_TOKEN environment variable is not set');
+    throw new Error("DISCORD_TOKEN environment variable is not set");
   }
-  
+
   try {
     // Login to Discord
     await client.login(token);
