@@ -5,8 +5,10 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Client, GatewayIntentBits, TextChannel, ForumChannel, ChannelType } from "discord.js";
+import { Client, GatewayIntentBits, TextChannel, ForumChannel, ChannelType, ThreadChannel } from "discord.js";
 import { z } from "zod";
+import * as fs from "fs";
+import * as path from "path";
 
 // Load environment variables
 dotenv.config();
@@ -69,13 +71,15 @@ async function findGuild(guildIdentifier?: string) {
 async function findChannel(
   channelIdentifier: string,
   guildIdentifier?: string
-): Promise<TextChannel> {
+): Promise<TextChannel | ThreadChannel> {
   const guild = await findGuild(guildIdentifier);
 
   // First try to fetch by ID
   try {
     const channel = await client.channels.fetch(channelIdentifier);
-    if (channel instanceof TextChannel && channel.guild.id === guild.id) {
+    if (channel && 
+        ((channel instanceof TextChannel && channel.guild.id === guild.id) ||
+         (channel instanceof ThreadChannel && channel.guild.id === guild.id))) {
       return channel;
     }
   } catch {
@@ -108,7 +112,7 @@ async function findChannel(
     return channels.first()!;
   }
   throw new Error(
-    `Channel "${channelIdentifier}" is not a text channel or not found in server "${guild.name}"`
+    `Channel "${channelIdentifier}" is not a text channel/thread or not found in server "${guild.name}"`
   );
 }
 
@@ -138,6 +142,19 @@ const ReadForumThreadsSchema = z.object({
     .describe("Server name or ID (optional if bot is only in one server)"),
   channel: z.string().describe("Forum channel name or ID"),
   limit: z.number().min(1).max(50).default(10),
+});
+
+const DownloadAttachmentSchema = z.object({
+  url: z.string().url().describe("Discord attachment URL to download"),
+  filename: z.string().optional().describe("Optional filename to save as (will extract from URL if not provided)"),
+  directory: z.string().optional().describe("Directory to save to (defaults to current directory)"),
+});
+
+const AddThreadTagsSchema = z.object({
+  server: z.string().optional().describe("Server name or ID (optional if bot is only in one server)"),
+  channel: z.string().describe("Forum channel name or ID"),
+  threadId: z.string().describe("Thread ID to add tags to"),
+  tagNames: z.array(z.string()).describe("Array of tag names to add to the thread"),
 });
 
 // Create server instance
@@ -226,6 +243,57 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["channel"],
+        },
+      },
+      {
+        name: "download-attachment",
+        description: "Download a Discord attachment to local filesystem",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: {
+              type: "string",
+              description: "Discord attachment URL to download",
+            },
+            filename: {
+              type: "string",
+              description: "Optional filename to save as (will extract from URL if not provided)",
+            },
+            directory: {
+              type: "string",
+              description: "Directory to save to (defaults to current directory)",
+            },
+          },
+          required: ["url"],
+        },
+      },
+      {
+        name: "add-thread-tags",
+        description: "Add tags to a Discord forum thread",
+        inputSchema: {
+          type: "object",
+          properties: {
+            server: {
+              type: "string",
+              description: "Server name or ID (optional if bot is only in one server)",
+            },
+            channel: {
+              type: "string",
+              description: "Forum channel name or ID",
+            },
+            threadId: {
+              type: "string",
+              description: "Thread ID to add tags to",
+            },
+            tagNames: {
+              type: "array",
+              items: {
+                type: "string"
+              },
+              description: "Array of tag names to add to the thread",
+            },
+          },
+          required: ["channel", "threadId", "tagNames"],
         },
       },
     ],
@@ -348,6 +416,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = [];
         for (const thread of threadList) {
           const threadMessages = await thread.messages.fetch({ limit: 10 });
+          
+          // Get thread tags
+          const threadTags = thread.appliedTags.map(tagId => {
+            const tag = forumChannel!.availableTags.find(t => t.id === tagId);
+            return tag ? {
+              id: tag.id,
+              name: tag.name,
+              emoji: tag.emoji ? {
+                id: tag.emoji.id,
+                name: tag.emoji.name
+              } : null
+            } : {
+              id: tagId,
+              name: 'Unknown Tag',
+              emoji: null
+            };
+          });
+          
           const messagesArr = Array.from(threadMessages.values()).map(
             (msg) => ({
               thread: thread.name,
@@ -379,6 +465,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           result.push({
             thread: thread.name,
             threadId: thread.id,
+            tags: threadTags,
             messages: messagesArr,
           });
         }
@@ -387,6 +474,155 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: "text",
               text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "download-attachment": {
+        const { url, filename, directory } = DownloadAttachmentSchema.parse(args);
+        
+        // Extract filename from URL if not provided
+        let finalFilename = filename;
+        if (!finalFilename) {
+          const urlParts = new URL(url);
+          const pathParts = urlParts.pathname.split('/');
+          finalFilename = pathParts[pathParts.length - 1] || 'downloaded_file';
+          // Remove Discord's URL parameters for cleaner filename
+          if (finalFilename.includes('?')) {
+            finalFilename = finalFilename.split('?')[0];
+          }
+        }
+        
+        // Set directory (default to current working directory)
+        const saveDir = directory || process.cwd();
+        const fullPath = path.join(saveDir, finalFilename);
+        
+        // Ensure directory exists
+        if (!fs.existsSync(saveDir)) {
+          fs.mkdirSync(saveDir, { recursive: true });
+        }
+        
+        try {
+          // Download the file
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+          
+          // Get file data
+          const buffer = await response.arrayBuffer();
+          
+          // Write to file
+          fs.writeFileSync(fullPath, Buffer.from(buffer));
+          
+          // Get file stats
+          const stats = fs.statSync(fullPath);
+          
+          return {
+            content: [
+              {
+                type: "text",
+                text: `File downloaded successfully!\nPath: ${fullPath}\nSize: ${stats.size} bytes\nFilename: ${finalFilename}`,
+              },
+            ],
+          };
+        } catch (downloadError) {
+          throw new Error(`Failed to download file: ${downloadError instanceof Error ? downloadError.message : String(downloadError)}`);
+        }
+      }
+
+      case "add-thread-tags": {
+        const { server, channel: channelIdentifier, threadId, tagNames } = AddThreadTagsSchema.parse(args);
+        
+        // Find the guild and forum channel
+        const guild = await findGuild(server);
+        let forumChannel: ForumChannel | undefined;
+        try {
+          const ch = await guild.channels.fetch(channelIdentifier);
+          if (ch && ch.type === ChannelType.GuildForum) {
+            forumChannel = ch as ForumChannel;
+          }
+        } catch {}
+        
+        if (!forumChannel) {
+          // Search by name
+          const channels = guild.channels.cache.filter(
+            (c): c is ForumChannel =>
+              c.type === ChannelType.GuildForum &&
+              (c.name.toLowerCase() === channelIdentifier.toLowerCase() ||
+                c.name.toLowerCase() === channelIdentifier.toLowerCase().replace("#", ""))
+          );
+          if (channels.size === 0) {
+            const availableForums = guild.channels.cache
+              .filter((c) => c.type === ChannelType.GuildForum)
+              .map((c) => `"#${c.name}"`)
+              .join(", ");
+            throw new Error(
+              `Forum channel "${channelIdentifier}" not found in server "${guild.name}". Available forums: ${availableForums}`
+            );
+          }
+          if (channels.size > 1) {
+            const forumList = channels
+              .map((c) => `#${c.name} (${c.id})`)
+              .join(", ");
+            throw new Error(
+              `Multiple forum channels found with name "${channelIdentifier}" in server "${guild.name}": ${forumList}. Please specify the channel ID.`
+            );
+          }
+          forumChannel = channels.first();
+        }
+        
+        if (!forumChannel) {
+          throw new Error(`Forum channel "${channelIdentifier}" not found`);
+        }
+        
+        // Get the thread
+        const thread = await guild.channels.fetch(threadId);
+        if (!thread || thread.type !== ChannelType.PublicThread || thread.parent?.id !== forumChannel.id) {
+          throw new Error(`Thread "${threadId}" not found in forum channel "${forumChannel.name}"`);
+        }
+        
+        // Find tag IDs from tag names
+        const tagIds: string[] = [];
+        const notFoundTags: string[] = [];
+        
+        for (const tagName of tagNames) {
+          const foundTag = forumChannel.availableTags.find(tag => 
+            tag.name.toLowerCase() === tagName.toLowerCase()
+          );
+          if (foundTag) {
+            tagIds.push(foundTag.id);
+          } else {
+            notFoundTags.push(tagName);
+          }
+        }
+        
+        if (notFoundTags.length > 0) {
+          const availableTags = forumChannel.availableTags.map(tag => `"${tag.name}"`).join(", ");
+          throw new Error(
+            `Tags not found: ${notFoundTags.join(", ")}. Available tags: ${availableTags}`
+          );
+        }
+        
+        // Combine existing tags with new tags (avoid duplicates)
+        const currentTagIds = thread.appliedTags;
+        const newTagIds = [...new Set([...currentTagIds, ...tagIds])];
+        
+        // Apply the tags
+        await thread.setAppliedTags(newTagIds);
+        
+        // Get the updated tag names for response
+        const updatedTagNames = newTagIds.map(tagId => {
+          const tag = forumChannel!.availableTags.find(t => t.id === tagId);
+          return tag ? tag.name : 'Unknown Tag';
+        });
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Tags added successfully to thread "${thread.name}" in #${forumChannel.name}!\nApplied tags: ${updatedTagNames.join(", ")}`,
             },
           ],
         };
