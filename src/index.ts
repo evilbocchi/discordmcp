@@ -159,6 +159,13 @@ const AddThreadTagsSchema = z.object({
   tagNames: z.array(z.string()).describe("Array of tag names to add to the thread"),
 });
 
+const ListThreadsSchema = z.object({
+  server: z.string().optional().describe("Server name or ID (optional if bot is only in one server)"),
+  channel: z.string().describe("Forum channel name or ID"),
+  limit: z.number().min(1).max(100).default(50).describe("Number of threads to fetch"),
+  includeArchived: z.boolean().default(false).describe("Include archived threads"),
+});
+
 // Create server instance
 const server = new Server(
   {
@@ -304,6 +311,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["channel", "threadId", "tagNames"],
+        },
+      },
+      {
+        name: "list-threads",
+        description: "List forum thread information without messages",
+        inputSchema: {
+          type: "object",
+          properties: {
+            server: {
+              type: "string",
+              description: "Server name or ID (optional if bot is only in one server)",
+            },
+            channel: {
+              type: "string",
+              description: "Forum channel name or ID",
+            },
+            limit: {
+              type: "number",
+              description: "Number of threads to fetch (max 100)",
+              default: 50,
+            },
+            includeArchived: {
+              type: "boolean",
+              description: "Include archived threads",
+              default: false,
+            },
+          },
+          required: ["channel"],
         },
       },
     ],
@@ -645,6 +680,122 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: "text",
               text: `Tags added successfully to thread "${thread.name}" in #${forumChannel.name}!\nApplied tags: ${updatedTagNames.join(", ")}`,
+            },
+          ],
+        };
+      }
+
+      case "list-threads": {
+        const { server, channel: channelIdentifier, limit, includeArchived } = ListThreadsSchema.parse(args);
+        
+        // Find the guild and forum channel
+        const guild = await findGuild(server);
+        let forumChannel: ForumChannel | undefined;
+        try {
+          const ch = await guild.channels.fetch(channelIdentifier);
+          if (ch && ch.type === ChannelType.GuildForum) {
+            forumChannel = ch as ForumChannel;
+          }
+        } catch {}
+        
+        if (!forumChannel) {
+          // Search by name
+          const channels = guild.channels.cache.filter(
+            (c): c is ForumChannel =>
+              c.type === ChannelType.GuildForum &&
+              (c.name.toLowerCase() === channelIdentifier.toLowerCase() ||
+                c.name.toLowerCase() === channelIdentifier.toLowerCase().replace("#", ""))
+          );
+          if (channels.size === 0) {
+            const availableForums = guild.channels.cache
+              .filter((c) => c.type === ChannelType.GuildForum)
+              .map((c) => `"#${c.name}"`)
+              .join(", ");
+            throw new Error(
+              `Forum channel "${channelIdentifier}" not found in server "${guild.name}". Available forums: ${availableForums}`
+            );
+          }
+          if (channels.size > 1) {
+            const forumList = channels
+              .map((c) => `#${c.name} (${c.id})`)
+              .join(", ");
+            throw new Error(
+              `Multiple forum channels found with name "${channelIdentifier}" in server "${guild.name}": ${forumList}. Please specify the channel ID.`
+            );
+          }
+          forumChannel = channels.first();
+        }
+        
+        if (!forumChannel) {
+          throw new Error(`Forum channel "${channelIdentifier}" not found`);
+        }
+        
+        // Fetch both active and archived threads
+        let allThreads: Collection<string, ThreadChannel> = new Collection();
+        
+        // Get active threads
+        const activeThreads = await forumChannel.threads.fetchActive();
+        allThreads = allThreads.concat(activeThreads.threads);
+        
+        // Get archived threads if requested
+        if (includeArchived) {
+          const archivedThreads = await forumChannel.threads.fetchArchived();
+          allThreads = allThreads.concat(archivedThreads.threads);
+        }
+        
+        // Sort by creation date (newest first) and limit
+        const threadList = Array.from(allThreads.values())
+          .sort((a, b) => b.createdTimestamp! - a.createdTimestamp!)
+          .slice(0, limit);
+        
+        // Format thread information
+        const result = threadList.map(thread => {
+          // Get thread tags
+          const threadTags = thread.appliedTags.map(tagId => {
+            const tag = forumChannel!.availableTags.find(t => t.id === tagId);
+            return tag ? {
+              id: tag.id,
+              name: tag.name,
+              emoji: tag.emoji ? {
+                id: tag.emoji.id,
+                name: tag.emoji.name
+              } : null
+            } : {
+              id: tagId,
+              name: 'Unknown Tag',
+              emoji: null
+            };
+          });
+          
+          return {
+            threadId: thread.id,
+            threadName: thread.name,
+            createdAt: thread.createdAt?.toISOString(),
+            createdTimestamp: thread.createdTimestamp,
+            ownerId: thread.ownerId,
+            archived: thread.archived,
+            locked: thread.locked,
+            messageCount: thread.messageCount,
+            memberCount: thread.memberCount,
+            totalMessageSent: thread.totalMessageSent,
+            rateLimitPerUser: thread.rateLimitPerUser,
+            tags: threadTags,
+            lastMessageId: thread.lastMessageId,
+            lastPinTimestamp: thread.lastPinTimestamp ? new Date(thread.lastPinTimestamp).toISOString() : null,
+          };
+        });
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                forumChannel: forumChannel.name,
+                server: guild.name,
+                totalThreads: result.length,
+                includeArchived,
+                threads: result
+              }, null, 2),
             },
           ],
         };
