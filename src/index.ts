@@ -166,6 +166,15 @@ const ListThreadsSchema = z.object({
   includeArchived: z.boolean().default(false).describe("Include archived threads"),
 });
 
+const SearchThreadsSchema = z.object({
+  server: z.string().optional().describe("Server name or ID (optional if bot is only in one server)"),
+  channel: z.string().describe("Forum channel name or ID"),
+  query: z.string().describe("Search query to match against thread names"),
+  limit: z.number().min(1).max(100).default(50).describe("Maximum number of threads to return"),
+  includeArchived: z.boolean().default(true).describe("Include archived threads in search"),
+  exactMatch: z.boolean().default(false).describe("Whether to match exactly or use contains search"),
+});
+
 // Create server instance
 const server = new Server(
   {
@@ -339,6 +348,43 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["channel"],
+        },
+      },
+      {
+        name: "search-threads",
+        description: "Search for forum threads by name or other criteria",
+        inputSchema: {
+          type: "object",
+          properties: {
+            server: {
+              type: "string",
+              description: "Server name or ID (optional if bot is only in one server)",
+            },
+            channel: {
+              type: "string",
+              description: "Forum channel name or ID",
+            },
+            query: {
+              type: "string",
+              description: "Search query to match against thread names",
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of threads to return (max 100)",
+              default: 50,
+            },
+            includeArchived: {
+              type: "boolean",
+              description: "Include archived threads in search",
+              default: true,
+            },
+            exactMatch: {
+              type: "boolean",
+              description: "Whether to match exactly or use contains search",
+              default: false,
+            },
+          },
+          required: ["channel", "query"],
         },
       },
     ],
@@ -793,6 +839,158 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 forumChannel: forumChannel.name,
                 server: guild.name,
                 totalThreads: result.length,
+                includeArchived,
+                threads: result
+              }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "search-threads": {
+        const { server, channel: channelIdentifier, query, limit, includeArchived, exactMatch } = SearchThreadsSchema.parse(args);
+        
+        // Find the guild and forum channel
+        const guild = await findGuild(server);
+        let forumChannel: ForumChannel | undefined;
+        try {
+          const ch = await guild.channels.fetch(channelIdentifier);
+          if (ch && ch.type === ChannelType.GuildForum) {
+            forumChannel = ch as ForumChannel;
+          }
+        } catch {}
+        
+        if (!forumChannel) {
+          // Search by name
+          const channels = guild.channels.cache.filter(
+            (c): c is ForumChannel =>
+              c.type === ChannelType.GuildForum &&
+              (c.name.toLowerCase() === channelIdentifier.toLowerCase() ||
+                c.name.toLowerCase() === channelIdentifier.toLowerCase().replace("#", ""))
+          );
+          if (channels.size === 0) {
+            const availableForums = guild.channels.cache
+              .filter((c) => c.type === ChannelType.GuildForum)
+              .map((c) => `"#${c.name}"`)
+              .join(", ");
+            throw new Error(
+              `Forum channel "${channelIdentifier}" not found in server "${guild.name}". Available forums: ${availableForums}`
+            );
+          }
+          if (channels.size > 1) {
+            const forumList = channels
+              .map((c) => `#${c.name} (${c.id})`)
+              .join(", ");
+            throw new Error(
+              `Multiple forum channels found with name "${channelIdentifier}" in server "${guild.name}": ${forumList}. Please specify the channel ID.`
+            );
+          }
+          forumChannel = channels.first();
+        }
+        
+        if (!forumChannel) {
+          throw new Error(`Forum channel "${channelIdentifier}" not found`);
+        }
+        
+        // Fetch both active and archived threads
+        let allThreads: Collection<string, ThreadChannel> = new Collection();
+        
+        // Get active threads
+        const activeThreads = await forumChannel.threads.fetchActive();
+        allThreads = allThreads.concat(activeThreads.threads);
+        
+        // Get archived threads if requested
+        if (includeArchived) {
+          // Try to fetch as many archived threads as possible with pagination
+          let hasMore = true;
+          let before: string | undefined = undefined;
+          let fetchCount = 0;
+          const maxFetches = 10; // Limit to prevent infinite loops
+          
+          while (hasMore && fetchCount < maxFetches) {
+            const archivedOptions: any = { limit: 100 };
+            if (before) {
+              archivedOptions.before = before;
+            }
+            
+            const archivedThreads = await forumChannel.threads.fetchArchived(archivedOptions);
+            
+            if (archivedThreads.threads.size === 0) {
+              hasMore = false;
+            } else {
+              allThreads = allThreads.concat(archivedThreads.threads);
+              // Get the oldest thread ID for pagination
+              const threadIds = Array.from(archivedThreads.threads.keys());
+              before = threadIds[threadIds.length - 1];
+              fetchCount++;
+            }
+          }
+        }
+        
+        // Filter threads based on search query
+        const queryLower = query.toLowerCase();
+        const filteredThreads = Array.from(allThreads.values()).filter(thread => {
+          const threadNameLower = thread.name.toLowerCase();
+          if (exactMatch) {
+            return threadNameLower === queryLower;
+          } else {
+            return threadNameLower.includes(queryLower);
+          }
+        });
+        
+        // Sort by creation date (newest first) and limit
+        const threadList = filteredThreads
+          .sort((a, b) => b.createdTimestamp! - a.createdTimestamp!)
+          .slice(0, limit);
+        
+        // Format thread information
+        const result = threadList.map(thread => {
+          // Get thread tags
+          const threadTags = thread.appliedTags.map(tagId => {
+            const tag = forumChannel!.availableTags.find(t => t.id === tagId);
+            return tag ? {
+              id: tag.id,
+              name: tag.name,
+              emoji: tag.emoji ? {
+                id: tag.emoji.id,
+                name: tag.emoji.name
+              } : null
+            } : {
+              id: tagId,
+              name: 'Unknown Tag',
+              emoji: null
+            };
+          });
+          
+          return {
+            threadId: thread.id,
+            threadName: thread.name,
+            createdAt: thread.createdAt?.toISOString(),
+            createdTimestamp: thread.createdTimestamp,
+            ownerId: thread.ownerId,
+            archived: thread.archived,
+            locked: thread.locked,
+            messageCount: thread.messageCount,
+            memberCount: thread.memberCount,
+            totalMessageSent: thread.totalMessageSent,
+            rateLimitPerUser: thread.rateLimitPerUser,
+            tags: threadTags,
+            lastMessageId: thread.lastMessageId,
+            lastPinTimestamp: thread.lastPinTimestamp ? new Date(thread.lastPinTimestamp).toISOString() : null,
+          };
+        });
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                forumChannel: forumChannel.name,
+                server: guild.name,
+                query: query,
+                exactMatch: exactMatch,
+                totalFound: result.length,
+                totalSearched: filteredThreads.length,
                 includeArchived,
                 threads: result
               }, null, 2),
