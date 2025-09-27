@@ -5,7 +5,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Client, GatewayIntentBits, TextChannel, ForumChannel, ChannelType, ThreadChannel } from "discord.js";
+import { Client, GatewayIntentBits, TextChannel, ForumChannel, ChannelType, ThreadChannel, Collection } from "discord.js";
 import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
@@ -133,6 +133,7 @@ const ReadMessagesSchema = z.object({
     .describe("Server name or ID (optional if bot is only in one server)"),
   channel: z.string().describe('Channel name (e.g., "general") or ID'),
   limit: z.number().min(1).max(100).default(50),
+  before: z.union([z.string(), z.number()]).optional().describe("Message ID to fetch messages before (for pagination)"),
 });
 
 const ReadForumThreadsSchema = z.object({
@@ -142,6 +143,7 @@ const ReadForumThreadsSchema = z.object({
     .describe("Server name or ID (optional if bot is only in one server)"),
   channel: z.string().describe("Forum channel name or ID"),
   limit: z.number().min(1).max(50).default(10),
+  before: z.union([z.string(), z.number()]).optional().describe("Message ID to fetch messages before in each thread (for pagination)"),
 });
 
 const DownloadAttachmentSchema = z.object({
@@ -217,6 +219,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Number of messages to fetch (max 100)",
               default: 50,
             },
+            before: {
+              type: "string",
+              description: "Message ID to fetch messages before (for pagination)",
+            },
           },
           required: ["channel"],
         },
@@ -240,6 +246,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of threads to fetch (max 50)",
               default: 10,
+            },
+            before: {
+              type: "string",
+              description: "Message ID to fetch messages before in each thread (for pagination)",
             },
           },
           required: ["channel"],
@@ -323,12 +333,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "read-messages": {
-        const { channel: channelIdentifier, limit } =
+        const { channel: channelIdentifier, limit, before } =
           ReadMessagesSchema.parse(args);
         const channel = await findChannel(channelIdentifier);
 
-        const messages = await channel.messages.fetch({ limit });
-        const formattedMessages = Array.from(messages.values()).map((msg) => ({
+        const fetchOptions: { limit: number; before?: string } = { limit };
+        if (before) {
+          fetchOptions.before = String(before);
+        }
+
+        const messages = await channel.messages.fetch(fetchOptions);
+        const formattedMessages = messages.map((msg) => ({
+          messageId: msg.id,
           channel: `#${channel.name}`,
           server: channel.guild.name,
           author: msg.author.tag,
@@ -357,14 +373,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify(formattedMessages, null, 2),
+              text: JSON.stringify(Array.from(formattedMessages.values()), null, 2),
             },
           ],
         };
       }
 
       case "read-forum-threads": {
-        const { channel: channelIdentifier, limit } =
+        const { channel: channelIdentifier, limit, before } =
           ReadForumThreadsSchema.parse(args);
         // Find the guild and forum channel
         const guild = await findGuild(args!.server as string | undefined);
@@ -415,7 +431,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // For each thread, fetch the latest messages
         const result = [];
         for (const thread of threadList) {
-          const threadMessages = await thread.messages.fetch({ limit: 10 });
+          const fetchOptions: { limit: number; before?: string } = { limit: 10 };
+          if (before) {
+            fetchOptions.before = String(before);
+          }
+          
+          const threadMessages = await thread.messages.fetch(fetchOptions);
           
           // Get thread tags
           const threadTags = thread.appliedTags.map(tagId => {
@@ -436,6 +457,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           
           const messagesArr = Array.from(threadMessages.values()).map(
             (msg) => ({
+              messageId: msg.id,
               thread: thread.name,
               threadId: thread.id,
               channel: `#${forumChannel!.name}`,
