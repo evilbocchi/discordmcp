@@ -175,6 +175,12 @@ const SearchThreadsSchema = z.object({
   exactMatch: z.boolean().default(false).describe("Whether to match exactly or use contains search"),
 });
 
+const UnarchiveThreadSchema = z.object({
+  server: z.string().optional().describe("Server name or ID (optional if bot is only in one server)"),
+  threadId: z.string().describe("Thread ID to unarchive/reopen"),
+  reason: z.string().optional().describe("Optional reason for unarchiving the thread"),
+});
+
 // Create server instance
 const server = new Server(
   {
@@ -385,6 +391,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["channel", "query"],
+        },
+      },
+      {
+        name: "unarchive-thread",
+        description: "Unarchive (reopen) a forum thread",
+        inputSchema: {
+          type: "object",
+          properties: {
+            server: {
+              type: "string",
+              description: "Server name or ID (optional if bot is only in one server)",
+            },
+            threadId: {
+              type: "string",
+              description: "Thread ID to unarchive/reopen",
+            },
+            reason: {
+              type: "string",
+              description: "Optional reason for unarchiving the thread",
+            },
+          },
+          required: ["threadId"],
         },
       },
     ],
@@ -994,6 +1022,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 includeArchived,
                 threads: result
               }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "unarchive-thread": {
+        const { server, threadId, reason } = UnarchiveThreadSchema.parse(args);
+        
+        // Find the guild
+        const guild = await findGuild(server);
+        
+        // Get the thread
+        const thread = await guild.channels.fetch(threadId);
+        if (!thread || !(thread instanceof ThreadChannel)) {
+          throw new Error(`Thread "${threadId}" not found or is not a thread`);
+        }
+        
+        // Check if thread is already unarchived
+        if (!thread.archived) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Thread "${thread.name}" is already active (not archived).`,
+              },
+            ],
+          };
+        }
+        
+        // Unarchive the thread
+        await thread.setArchived(false, reason);
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Thread "${thread.name}" (ID: ${thread.id}) has been successfully unarchived and is now active.${reason ? `\nReason: ${reason}` : ''}`,
             },
           ],
         };
